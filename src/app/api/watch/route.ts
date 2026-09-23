@@ -25,6 +25,12 @@ async function isKnownTitle(tmdbId: number, mediaType: string): Promise<boolean>
       .limit(1)
       .maybeSingle(),
   ]);
+
+  // A failed query leaves `data` null, which would read as "unknown title" and
+  // answer 404 — turning a database outage into a confident, wrong answer.
+  if (pool.error) throw pool.error;
+  if (match.error) throw match.error;
+
   return Boolean(pool.data || match.data);
 }
 

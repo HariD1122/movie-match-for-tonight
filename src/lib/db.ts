@@ -31,11 +31,30 @@ export function ok<T>(data: T) {
   return Response.json(data);
 }
 
+/**
+ * Supabase rejects with a plain object, not an Error, so `instanceof Error`
+ * alone turned every database failure into "Something went wrong" — which is
+ * exactly no help when the only view you have is the deployed response body.
+ * `details` is deliberately left out: it can echo row contents.
+ */
+function describe(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === "object") {
+    const e = err as { message?: unknown; code?: unknown; hint?: unknown };
+    const parts = [
+      typeof e.message === "string" ? e.message : null,
+      typeof e.code === "string" ? `[${e.code}]` : null,
+      typeof e.hint === "string" ? e.hint : null,
+    ].filter(Boolean);
+    if (parts.length) return parts.join(" ");
+  }
+  return "Something went wrong";
+}
+
 export function fail(err: unknown) {
   if (err instanceof HttpError) {
     return Response.json({ error: err.message }, { status: err.status });
   }
-  const message = err instanceof Error ? err.message : "Something went wrong";
   console.error("[tonight]", err);
-  return Response.json({ error: message }, { status: 500 });
+  return Response.json({ error: describe(err) }, { status: 500 });
 }
