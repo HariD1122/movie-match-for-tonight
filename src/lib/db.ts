@@ -6,16 +6,27 @@ let cached: SupabaseClient | null = null;
  * Service-role client. Server-side only — this key must never reach the
  * browser, which is why nothing here is prefixed NEXT_PUBLIC_.
  */
+/**
+ * supabase-js wants the bare project origin and appends `/rest/v1` itself.
+ * Pasting the REST endpoint instead — which is what the Supabase dashboard
+ * shows you next to the keys — yields `/rest/v1/rest/v1/<table>` and a
+ * PGRST125 on every single query. Too easy a mistake to punish someone for.
+ */
+export function normaliseSupabaseUrl(raw: string): string {
+  return raw.trim().replace(/\/+$/, "").replace(/\/rest(\/v\d+)?$/i, "");
+}
+
 export function db(): SupabaseClient {
   if (cached) return cached;
-  const url = process.env.SUPABASE_URL;
+  const raw = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) {
+  if (!raw || !key) {
     throw new Error(
-      "Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.local"
+      "Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY " +
+        "(in .env.local locally, or the environment variables of your host)."
     );
   }
-  cached = createClient(url, key, {
+  cached = createClient(normaliseSupabaseUrl(raw), key, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
   return cached;
