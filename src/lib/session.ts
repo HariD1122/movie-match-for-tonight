@@ -123,8 +123,30 @@ async function likedTitles(sessionId: string, round: number): Promise<{ a: Title
  * `building`, so the first thing we do is take a lock in the database --
  * whoever loses simply keeps polling.
  */
+/** How long a build may hold the lock before we assume it died. */
+const STALE_LOCK_MS = 90_000;
+
 export async function ensurePool(code: string): Promise<void> {
-  const session = await loadSession(code);
+  let session = await loadSession(code);
+
+  // A build killed mid-flight -- crash, redeploy, serverless timeout -- never
+  // reaches the catch that hands the lock back, and both partners then watch a
+  // spinner forever. Reclaim a lock that has clearly been abandoned.
+  if (session.status === "building_locked") {
+    const cutoff = new Date(Date.now() - STALE_LOCK_MS).toISOString();
+    const { data: reclaimed, error } = await db()
+      .from("sessions")
+      .update({ status: "building", updated_at: new Date().toISOString() })
+      .eq("id", session.id)
+      .eq("status", "building_locked")
+      .lt("updated_at", cutoff)
+      .select("id")
+      .maybeSingle();
+    if (error) throw error;
+    if (!reclaimed) return; // someone is genuinely still building
+    session = await loadSession(code);
+  }
+
   if (session.status !== "building") return;
 
   const { data: locked, error: lockErr } = await db()

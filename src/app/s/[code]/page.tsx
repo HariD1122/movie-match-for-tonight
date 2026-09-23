@@ -12,6 +12,7 @@ import { deviceId, get, post, setPairKey } from "@/lib/client";
 import type { Finalist, Preferences, SessionState, Title } from "@/lib/types";
 
 const POLL_MS = 1500;
+const POOL_TRIES = 3;
 
 export default function SessionPage() {
   const params = useParams<{ code: string }>();
@@ -24,7 +25,7 @@ export default function SessionPage() {
 
   const device = useRef<string>("");
   const inFlight = useRef(false);
-  const poolAsked = useRef<number | null>(null);
+  const poolRun = useRef<{ round: number; tries: number; busy: boolean } | null>(null);
   const finishSent = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
@@ -75,14 +76,30 @@ export default function SessionPage() {
   }, [joined, refresh]);
 
   // Whoever gets here first builds the pool; the server sorts out the race.
+  // A failed build hands the lock back, so this has to be able to try again --
+  // marking the round as "asked" up front would strand the session for good.
+  // Depends on the whole `state` so each poll re-evaluates the guards.
   useEffect(() => {
     if (state?.status !== "building") return;
-    if (poolAsked.current === state.round) return;
-    poolAsked.current = state.round;
+    const round = state.round;
+    const run = poolRun.current;
+    if (run && run.round === round && (run.busy || run.tries >= POOL_TRIES)) return;
+
+    const attempt = { round, tries: run?.round === round ? run.tries + 1 : 1, busy: true };
+    poolRun.current = attempt;
+
     post(`/api/session/${code}/pool`, {})
-      .then(refresh)
-      .catch((err) => setError((err as Error).message));
-  }, [state?.status, state?.round, code, refresh]);
+      .then(() => {
+        attempt.busy = false;
+        setError(null);
+        return refresh();
+      })
+      .catch((err) => {
+        attempt.busy = false;
+        // Stay quiet until the retries are spent; the next poll picks it up.
+        if (attempt.tries >= POOL_TRIES) setError((err as Error).message);
+      });
+  }, [state, code, refresh]);
 
   const submitPrefs = async (prefs: Preferences) => {
     await post(`/api/session/${code}/preferences`, {
