@@ -1,24 +1,17 @@
-import { imdbId, providerLogo, watchProviders } from "./tmdb";
+import { imdbId, providerLogo, providerLogoIndex, watchProviders } from "./tmdb";
 import type { Provider, WhereToWatch } from "./types";
 
-const HOST = process.env.RAPIDAPI_HOST || "streaming-availability.p.rapidapi.com";
+const HOST = process.env.RAPIDAPI_HOST || "ott-details.p.rapidapi.com";
 
-interface RapidService {
-  id?: string;
-  name?: string;
-  imageSet?: { lightThemeImage?: string; darkThemeImage?: string };
+interface OttEntry {
+  url?: string;
+  platform?: string;
 }
-interface RapidOption {
-  service?: RapidService;
-  type?: string; // subscription | rent | buy | free | addon
-  link?: string;
-  price?: { formatted?: string };
-  addon?: { name?: string };
-}
-interface RapidShow {
-  imdbId?: string;
-  rating?: number; // IMDb rating x10
-  streamingOptions?: Record<string, RapidOption[]>;
+interface OttDetails {
+  imdbid?: string;
+  imdbrating?: number;
+  title?: string;
+  streamingAvailability?: { country?: Record<string, OttEntry[]> };
 }
 
 const KIND_ORDER: Record<Provider["kind"], number> = {
@@ -29,75 +22,100 @@ const KIND_ORDER: Record<Provider["kind"], number> = {
   buy: 4,
 };
 
-function normaliseKind(t?: string): Provider["kind"] {
-  switch (t) {
-    case "subscription":
-      return "subscription";
-    case "free":
-      return "free";
-    case "addon":
-      return "addon";
-    case "rent":
-      return "rent";
-    case "buy":
-      return "buy";
-    default:
-      return "subscription";
-  }
+/**
+ * OTT Details returns a lowercase platform slug and nothing else — no display
+ * name, no logo. Anything not listed here falls back to a title-cased slug and
+ * is assumed to be a subscription service, which is the common case in India.
+ */
+const PLATFORMS: Record<string, { name: string; kind: Provider["kind"] }> = {
+  netflix: { name: "Netflix", kind: "subscription" },
+  prime: { name: "Amazon Prime Video", kind: "subscription" },
+  primevideo: { name: "Amazon Prime Video", kind: "subscription" },
+  amazon: { name: "Amazon Prime Video", kind: "subscription" },
+  hotstar: { name: "JioHotstar", kind: "subscription" },
+  jiohotstar: { name: "JioHotstar", kind: "subscription" },
+  disney: { name: "JioHotstar", kind: "subscription" },
+  disneyplus: { name: "JioHotstar", kind: "subscription" },
+  jiocinema: { name: "JioCinema", kind: "subscription" },
+  zee5: { name: "ZEE5", kind: "subscription" },
+  sonyliv: { name: "SonyLIV", kind: "subscription" },
+  voot: { name: "Voot", kind: "subscription" },
+  aha: { name: "aha", kind: "subscription" },
+  sunnxt: { name: "Sun NXT", kind: "subscription" },
+  erosnow: { name: "Eros Now", kind: "subscription" },
+  altbalaji: { name: "ALTT", kind: "subscription" },
+  mubi: { name: "MUBI", kind: "subscription" },
+  appletv: { name: "Apple TV+", kind: "subscription" },
+  mxplayer: { name: "MX Player", kind: "free" },
+  tubi: { name: "Tubi", kind: "free" },
+  plex: { name: "Plex", kind: "free" },
+  itunes: { name: "Apple TV (iTunes)", kind: "rent" },
+  apple: { name: "Apple TV (iTunes)", kind: "rent" },
+  play: { name: "Google Play", kind: "rent" },
+  googleplay: { name: "Google Play", kind: "rent" },
+  youtube: { name: "YouTube", kind: "rent" },
+};
+
+// Longest first, so "googleplay" is tested before "play" and "appletv"
+// before "apple".
+const PLATFORM_KEYS = Object.keys(PLATFORMS).sort((a, b) => b.length - a.length);
+
+function describe(slug: string): { name: string; kind: Provider["kind"] } {
+  const key = slug.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (PLATFORMS[key]) return PLATFORMS[key];
+
+  // The slugs are not a fixed vocabulary — "amazonprimevideo" and "primevideo"
+  // both turn up — so fall back to a containment match before giving up.
+  const near = PLATFORM_KEYS.find((k) => key.includes(k));
+  if (near) return PLATFORMS[near];
+
+  return { name: slug.charAt(0).toUpperCase() + slug.slice(1), kind: "subscription" };
 }
 
-function prettyName(s?: RapidService, addon?: string): string {
-  const base = s?.name || s?.id || "Unknown";
-  return addon ? `${base} · ${addon}` : base;
-}
-
-async function fromRapidApi(
-  tmdbIdNum: number,
-  mediaType: "movie" | "tv"
-): Promise<{ providers: Provider[]; imdb: string | null; imdbRating: number | null } | null> {
+/**
+ * The BASIC RapidAPI plan rate-limits per second, so a burst 429s instantly.
+ * One short backoff is enough — this is only called on the match screen.
+ */
+async function fetchDetails(imdb: string): Promise<OttDetails | null> {
   const key = process.env.RAPIDAPI_KEY;
   if (!key) return null;
 
-  const showId = `tmdb/${mediaType === "movie" ? "movie" : "series"}/${tmdbIdNum}`;
-  const url = `https://${HOST}/shows/${showId}?country=in&output_language=en&series_granularity=show`;
-
-  try {
-    const res = await fetch(url, {
-      headers: { "X-RapidAPI-Key": key, "X-RapidAPI-Host": HOST },
-      next: { revalidate: 60 * 30 },
-    });
-    if (!res.ok) return null;
-    const show = (await res.json()) as RapidShow;
-
-    const options = show.streamingOptions?.in ?? [];
-    const byName = new Map<string, Provider>();
-    for (const o of options) {
-      if (!o.link) continue;
-      const name = prettyName(o.service, o.addon?.name);
-      const kind = normaliseKind(o.type);
-      const existing = byName.get(name);
-      // Keep the cheapest way in: a subscription link beats a rental link.
-      if (existing && KIND_ORDER[existing.kind] <= KIND_ORDER[kind]) continue;
-      byName.set(name, {
-        name,
-        logo: o.service?.imageSet?.darkThemeImage || o.service?.imageSet?.lightThemeImage || null,
-        link: o.link,
-        kind,
-        price: o.price?.formatted,
-        direct: true,
+  const url = `https://${HOST}/gettitleDetails?imdbid=${encodeURIComponent(imdb)}`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: { "x-rapidapi-key": key, "x-rapidapi-host": HOST },
+        signal: AbortSignal.timeout(12_000),
+        next: { revalidate: 60 * 30 },
       });
+      if (res.status === 429) {
+        await new Promise((r) => setTimeout(r, 1200));
+        continue;
+      }
+      if (!res.ok) return null;
+      return (await res.json()) as OttDetails;
+    } catch (err) {
+      console.error("[tonight] OTT Details lookup failed:", err);
+      return null;
     }
-
-    const providers = [...byName.values()].sort((x, y) => KIND_ORDER[x.kind] - KIND_ORDER[y.kind]);
-    return {
-      providers,
-      imdb: show.imdbId ?? null,
-      imdbRating: typeof show.rating === "number" ? Math.round(show.rating) / 10 : null,
-    };
-  } catch (err) {
-    console.error("[tonight] RapidAPI lookup failed:", err);
-    return null;
   }
+  return null;
+}
+
+function fromOttDetails(d: OttDetails): Provider[] {
+  const india = d.streamingAvailability?.country?.IN ?? [];
+  const byName = new Map<string, Provider>();
+
+  for (const entry of india) {
+    if (!entry.url || !entry.platform) continue;
+    const { name, kind } = describe(entry.platform);
+    const existing = byName.get(name);
+    // Keep the cheapest way in: a subscription beats a rental.
+    if (existing && KIND_ORDER[existing.kind] <= KIND_ORDER[kind]) continue;
+    byName.set(name, { name, logo: null, link: entry.url, kind, direct: true });
+  }
+
+  return [...byName.values()].sort((x, y) => KIND_ORDER[x.kind] - KIND_ORDER[y.kind]);
 }
 
 async function fromTmdb(tmdbIdNum: number, mediaType: "movie" | "tv") {
@@ -106,7 +124,10 @@ async function fromTmdb(tmdbIdNum: number, mediaType: "movie" | "tv") {
 
   const link = res.link ?? null;
   const out = new Map<string, Provider>();
-  const push = (list: { provider_name: string; logo_path: string }[] | undefined, kind: Provider["kind"]) => {
+  const push = (
+    list: { provider_name: string; logo_path: string }[] | undefined,
+    kind: Provider["kind"]
+  ) => {
     for (const p of list ?? []) {
       const existing = out.get(p.provider_name);
       if (existing && KIND_ORDER[existing.kind] <= KIND_ORDER[kind]) continue;
@@ -134,34 +155,59 @@ async function fromTmdb(tmdbIdNum: number, mediaType: "movie" | "tv") {
   };
 }
 
+/** Loose match so "JioHotstar" can borrow the logo TMDB files under "Hotstar". */
+function sameService(a: string, b: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const x = norm(a);
+  const y = norm(b);
+  return x === y || x.includes(y) || y.includes(x);
+}
+
 /**
  * Where can these two actually watch this tonight, in India.
- * RapidAPI gives real deep links and the true IMDb rating; TMDB fills in
- * whatever RapidAPI misses (and covers us entirely if the key is absent).
+ * OTT Details supplies the real per-service deep links and the true IMDb
+ * rating; TMDB supplies the logos and covers us entirely if the key is absent.
  */
 export async function whereToWatch(
   tmdbIdNum: number,
   mediaType: "movie" | "tv"
 ): Promise<WhereToWatch> {
-  const [rapid, tmdb] = await Promise.all([
-    fromRapidApi(tmdbIdNum, mediaType),
+  const [imdb, tmdb] = await Promise.all([
+    imdbId(tmdbIdNum, mediaType),
     fromTmdb(tmdbIdNum, mediaType),
   ]);
 
+  const details = imdb ? await fetchDetails(imdb) : null;
+  const direct = details ? fromOttDetails(details) : [];
+
+  // Deep links win; TMDB rows fill in anything OTT Details missed.
+  const logos = await providerLogoIndex();
+  const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const logoFor = (name: string): string | null => {
+    const n = norm(name);
+    const exact = logos.get(n);
+    if (exact) return exact;
+    // Only allow fuzzy matching on names long enough not to collide.
+    if (n.length < 4) return null;
+    for (const [k, v] of logos) {
+      if (k.length >= 4 && (k.includes(n) || n.includes(k))) return v;
+    }
+    return null;
+  };
+
   const providers: Provider[] = [];
-  const seen = new Set<string>();
-  for (const p of [...(rapid?.providers ?? []), ...tmdb.providers]) {
-    const k = p.name.toLowerCase().split(" · ")[0];
-    if (seen.has(k)) continue;
-    seen.add(k);
-    providers.push(p);
+  const taken: string[] = [];
+  for (const p of [...direct, ...tmdb.providers]) {
+    if (taken.some((t) => sameService(t, p.name))) continue;
+    taken.push(p.name);
+    providers.push({ ...p, logo: p.logo ?? logoFor(p.name) });
   }
 
-  const imdb = rapid?.imdb ?? (await imdbId(tmdbIdNum, mediaType));
+  const rating = details?.imdbrating;
 
   return {
     providers,
-    imdbRating: rapid?.imdbRating ?? null,
+    imdbRating: typeof rating === "number" && rating > 0 ? rating : null,
     imdbUrl: imdb ? `https://www.imdb.com/title/${imdb}/` : null,
     justWatchUrl: tmdb.justWatchUrl,
     note: providers.length

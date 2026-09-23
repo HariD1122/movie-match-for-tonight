@@ -61,7 +61,7 @@ cp .env.example .env.local
 | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com/apikey) — this is the brief engine |
 | `ANTHROPIC_API_KEY` | Optional. Set it to run the brief on Claude instead of Gemini. |
 | `TMDB_ACCESS_TOKEN` | TMDB → Settings → API → *API Read Access Token* (v4). `TMDB_API_KEY` (v3) works too. |
-| `RAPIDAPI_KEY` | Subscribe to **Streaming Availability** on [RapidAPI](https://rapidapi.com/movie-of-the-night-movie-of-the-night-default/api/streaming-availability) |
+| `RAPIDAPI_KEY` | Subscribe to **OTT Details** on [RapidAPI](https://rapidapi.com/gox-ai-gox-ai-default/api/ott-details) |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Project Settings → API |
 | `NEXT_PUBLIC_APP_URL` | The origin the QR code points at — see below |
 
@@ -101,9 +101,10 @@ Every external service can fail without taking the night down:
   `gemini-2.0-flash` and `gemini-2.5-flash`). After that it falls back to a deterministic
   brief built from the mood chips alone — you lose the nuance from the free text, not the
   app. `brief.source` on the session row records which engine actually ran.
-- **RapidAPI unavailable or unsubscribed** → availability falls back to TMDB's own India
-  watch-provider data plus a JustWatch link. You lose per-service deep links and the true
-  IMDb number, not the answer to "where do we watch this".
+- **RapidAPI unavailable, unsubscribed or rate-limited** → a 429 on the BASIC plan is
+  retried once after a short backoff, then availability falls back to TMDB's own India
+  watch-provider data. You lose per-service deep links and the true IMDb number, not the
+  answer to "where do we watch this".
 - **A thin pool** → the TMDB sweep widens in stages (looser vote thresholds, then dropping
   the genre filter) rather than returning six cards. The rating floor and era are never
   relaxed, because those are the parts you explicitly asked for.
@@ -115,9 +116,11 @@ carry IMDb ratings, and fetching the real one for all 30 cards would mean 30 ext
 third-party calls before the deck can even be dealt. The two correlate closely and the
 minimum-rating filter behaves the way you'd expect.
 
-The **match screen** does show the true IMDb rating, pulled from RapidAPI along with the
-streaming links, and links out to the IMDb page. The label under the number tells you
-which source you're looking at.
+The **match screen** does show the true IMDb rating, pulled from OTT Details along with the
+per-service streaming links, and links out to the IMDb page. The label under the number
+tells you which source you're looking at. Fetching it for all 30 cards is not an option:
+OTT Details is keyed by IMDb id and its BASIC plan rate-limits per second, so a full deck
+would take half a minute before anyone could swipe.
 
 ---
 
@@ -141,7 +144,7 @@ src/
     providers/claude.ts      Claude adapter, used only if ANTHROPIC_API_KEY is set
     pool.ts                  brief + constraints → 30 titles
     tmdb.ts                  discover, search, detail, watch providers
-    ott.ts                   RapidAPI availability, TMDB fallback
+    ott.ts                   OTT Details deep links + IMDb rating, TMDB fallback
     session.ts               state machine, match detection, finalists
     db.ts                    Supabase service-role client
 supabase/schema.sql

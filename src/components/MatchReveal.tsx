@@ -56,7 +56,11 @@ function Providers({ where }: { where: WhereToWatch | null }) {
             // eslint-disable-next-line @next/next/no-img-element
             <img src={p.logo} alt="" className="h-9 w-9 rounded-lg object-cover" />
           ) : (
-            <div className="h-9 w-9 rounded-lg bg-line" />
+            // Services TMDB has no artwork for (defunct ones, mostly) get a
+            // monogram rather than an empty square.
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-line text-sm font-bold text-white/70">
+              {p.name.charAt(0).toUpperCase()}
+            </div>
           )}
           <div className="min-w-0 flex-1">
             <p className="truncate text-[15px] font-semibold">{p.name}</p>

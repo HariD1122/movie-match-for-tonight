@@ -203,3 +203,32 @@ export async function mapLimit<T, R>(
   await Promise.all(workers);
   return out;
 }
+
+const normName = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+let logoIndex: Map<string, string> | null = null;
+
+/**
+ * Every service TMDB knows about in India, name -> logo. OTT Details gives us
+ * deep links but no artwork, and borrowing a logo from the same title's TMDB
+ * row only works when TMDB happens to list that service too. This is one
+ * cached call that covers all of them.
+ */
+export async function providerLogoIndex(): Promise<Map<string, string>> {
+  if (logoIndex) return logoIndex;
+  const idx = new Map<string, string>();
+  for (const type of ["movie", "tv"] as const) {
+    try {
+      const d = await tmdb<{ results?: { provider_name: string; logo_path: string }[] }>(
+        `/watch/providers/${type}`,
+        { watch_region: "IN" }
+      );
+      for (const p of d.results ?? []) {
+        if (p.logo_path) idx.set(normName(p.provider_name), providerLogo(p.logo_path));
+      }
+    } catch {
+      /* a missing logo is cosmetic — never fail the match screen over it */
+    }
+  }
+  if (idx.size) logoIndex = idx;
+  return idx;
+}
