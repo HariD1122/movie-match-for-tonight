@@ -9,9 +9,23 @@ const TIMEOUT_MS = 25_000;
  * kept as a backstop so a retirement degrades to a slightly different model
  * rather than to the no-model fallback brief.
  */
+const DEFAULT_MODEL = "gemini-3.6-flash";
+
+/** A model id, not a URL or an API key pasted into the wrong box. */
+function looksLikeModelId(v: string): boolean {
+  return /^[a-z0-9.-]+$/i.test(v) && !v.includes("/") && v.startsWith("gemini");
+}
+
 function models(): string[] {
-  const preferred = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+  const configured = process.env.GEMINI_MODEL?.trim();
+  // An implausible value (a console URL, say) would otherwise burn a 404 on
+  // every single brief before the backstop rescued it.
+  const preferred = configured && looksLikeModelId(configured) ? configured : DEFAULT_MODEL;
   return [...new Set([preferred, "gemini-flash-latest"])];
+}
+
+export function resolvedGeminiModel(): string {
+  return models()[0];
 }
 
 // Gemini takes an OpenAPI-subset schema rather than JSON Schema, and honours

@@ -1,4 +1,5 @@
 import { db, fail, ok, normaliseSupabaseUrl } from "@/lib/db";
+import { resolvedGeminiModel } from "@/lib/providers/gemini";
 
 export const dynamic = "force-dynamic";
 
@@ -44,7 +45,7 @@ async function checkTmdb() {
   }
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
     const [supabase, tmdb] = await Promise.all([checkSupabase(), checkTmdb()]);
 
@@ -54,17 +55,23 @@ export async function GET() {
       tmdb,
       gemini: {
         configured: Boolean(process.env.GEMINI_API_KEY),
-        model: process.env.GEMINI_MODEL ?? "gemini-3.6-flash",
+        // What will actually be requested, which is not always what is set.
+        model: resolvedGeminiModel(),
+        configuredModel: process.env.GEMINI_MODEL ?? null,
       },
       claude: { configured: Boolean(process.env.ANTHROPIC_API_KEY) },
       rapidapi: {
         configured: Boolean(process.env.RAPIDAPI_KEY),
         host: process.env.RAPIDAPI_HOST ?? "ott-details.p.rapidapi.com",
       },
-      // The QR encodes this. Pointing at localhost or a LAN address on a
-      // deployed app means your partner scans a code that goes nowhere.
-      appUrl,
-      appUrlLooksLocal: appUrl ? /localhost|127\.0\.0\.1|^http:\/\/\d+\.\d+\.\d+\.\d+/.test(appUrl) : true,
+      // The QR encodes this. Unset is fine -- the app falls back to the
+      // origin the request arrived on -- so only an explicitly local value
+      // is a problem once deployed.
+      appUrl: appUrl || null,
+      qrOrigin: appUrl || new URL(req.url).origin,
+      appUrlLooksLocal: Boolean(
+        appUrl && /localhost|127\.0\.0\.1|^https?:\/\/\d+\.\d+\.\d+\.\d+/.test(appUrl)
+      ),
     };
 
     // `healthy` is about whether the services answer. A local-looking app URL
@@ -75,7 +82,13 @@ export async function GET() {
     const warnings: string[] = [];
     if (body.appUrlLooksLocal) {
       warnings.push(
-        "NEXT_PUBLIC_APP_URL points at localhost or a LAN address. Correct for local dev; on a deployed app the QR code will be unscannable."
+        `NEXT_PUBLIC_APP_URL is set to ${body.appUrl}, so the QR code encodes that address. Correct for local dev; unscannable from another phone once deployed.`
+      );
+    }
+    const configuredModel = process.env.GEMINI_MODEL?.trim();
+    if (configuredModel && configuredModel !== body.gemini.model) {
+      warnings.push(
+        `GEMINI_MODEL is "${configuredModel}", which is not a model id — ignoring it and using ${body.gemini.model}.`
       );
     }
     if (!body.rapidapi.configured) {
